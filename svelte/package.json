@@ -1,0 +1,25 @@
+{
+  "name": "@pulseboard/svelte",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Minimal Svelte parity build for PulseBoard — same live feed, different framework.",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --port 5174",
+    "build": "vite build",
+    "preview": "vite preview",
+    "check": "svelte-check --tsconfig ./tsconfig.json"
+  },
+  "dependencies": {
+    "socket.io-client": "^4.8.1"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^5.0.3",
+    "@tsconfig/svelte": "^5.0.4",
+    "svelte": "^5.16.0",
+    "svelte-check": "^4.1.1",
+    "typescript": "^5.7.3",
+    "vite": "^6.0.7"
+  }
+}

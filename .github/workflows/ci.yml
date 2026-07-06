@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    name: Build & test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type-check all workspaces
+        run: npm run typecheck
+
+      - name: Run server tests
+        run: npm test
+
+      - name: Build server
+        run: npm run build:server
+
+      - name: Build Vue client (flagship)
+        run: npm run build:client
+
+      - name: Build Svelte parity app
+        run: npm run build:svelte

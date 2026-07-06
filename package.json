@@ -1,0 +1,36 @@
+{
+  "name": "pulseboard",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Real-time collaborative analytics dashboard with drag-to-arrange widgets and a built-in data simulator.",
+  "license": "MIT",
+  "author": "xj16",
+  "type": "module",
+  "workspaces": [
+    "server",
+    "client",
+    "svelte"
+  ],
+  "scripts": {
+    "dev": "npm-run-all --parallel dev:server dev:client",
+    "dev:server": "npm --workspace server run dev",
+    "dev:client": "npm --workspace client run dev",
+    "dev:svelte": "npm --workspace svelte run dev",
+    "build": "npm-run-all build:server build:client build:svelte",
+    "build:server": "npm --workspace server run build",
+    "build:client": "npm --workspace client run build",
+    "build:svelte": "npm --workspace svelte run build",
+    "start": "npm --workspace server run start",
+    "test": "npm --workspace server run test",
+    "typecheck": "npm-run-all typecheck:server typecheck:client typecheck:svelte",
+    "typecheck:server": "npm --workspace server run typecheck",
+    "typecheck:client": "npm --workspace client run typecheck",
+    "typecheck:svelte": "npm --workspace svelte run check"
+  },
+  "devDependencies": {
+    "npm-run-all": "^4.1.5"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
