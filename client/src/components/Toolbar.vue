@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { ref } from 'vue';
+import { computed, ref } from 'vue';
 import { useDashboardStore } from '../store/dashboard';
-import type { MetricId, WidgetKind } from '../protocol';
+import { SCENARIOS, type MetricId, type ScenarioId, type WidgetKind } from '../protocol';
 
 const store = useDashboardStore();
 
@@ -18,6 +18,35 @@ const kinds: { value: WidgetKind; label: string }[] = [
 
 function add() {
   store.addWidget(kind.value, metric.value);
+}
+
+function onScenario(e: Event) {
+  store.setScenario((e.target as HTMLSelectElement).value as ScenarioId);
+}
+
+// Up to 4 avatars in the stack; the rest collapse into a "+N".
+const shownPeers = computed(() => store.peers.slice(0, 4));
+const overflow = computed(() => Math.max(0, store.peers.length - shownPeers.value.length));
+
+const copied = ref(false);
+async function shareRoom() {
+  const url = `${window.location.origin}/?room=${encodeURIComponent(store.room)}`;
+  try {
+    await navigator.clipboard.writeText(url);
+    copied.value = true;
+    setTimeout(() => (copied.value = false), 1500);
+  } catch {
+    store.pushNotice('info', `Share this link: ${url}`);
+  }
+}
+
+function initials(name: string): string {
+  return name
+    .split(' ')
+    .map((p) => p[0])
+    .join('')
+    .slice(0, 2)
+    .toUpperCase();
 }
 </script>
 
@@ -46,6 +75,15 @@ function add() {
       <button class="btn" title="Restore the default layout" @click="store.resetBoard()">
         Reset
       </button>
+
+      <label class="field field--scenario">
+        <span>Scenario</span>
+        <select :value="store.scenario" @change="onScenario">
+          <option v-for="s in SCENARIOS" :key="s.id" :value="s.id" :title="s.blurb">
+            {{ s.label }}
+          </option>
+        </select>
+      </label>
     </div>
 
     <div class="toolbar__status">
@@ -53,9 +91,26 @@ function add() {
         <span class="pill__dot"></span>
         {{ store.connected ? 'Live' : 'Offline' }}
       </span>
-      <span class="pill" title="People viewing this board">
-        👥 {{ store.presence }}
-      </span>
+
+      <!-- Avatar stack replaces the bare presence count. -->
+      <div class="peers" :title="`${store.presence} viewing this board`">
+        <span
+          v-for="p in shownPeers"
+          :key="p.id"
+          class="avatar"
+          :class="{ 'avatar--self': p.id === store.self?.id }"
+          :style="{ background: p.color }"
+          :title="p.id === store.self?.id ? `${p.name} (you)` : p.name"
+        >
+          {{ initials(p.name) }}
+        </span>
+        <span v-if="overflow > 0" class="avatar avatar--more">+{{ overflow }}</span>
+      </div>
+
+      <button class="pill pill--btn" title="Copy a shareable link to this room" @click="shareRoom">
+        🔗 {{ copied ? 'Copied!' : store.room }}
+      </button>
+
       <span class="pill" title="Board revision">rev {{ store.board.rev }}</span>
     </div>
   </div>
@@ -127,6 +182,19 @@ select {
   border-radius: 999px;
   padding: 0.3rem 0.65rem;
 }
+.pill--btn {
+  cursor: pointer;
+  background: var(--bg);
+  color: var(--text);
+  font-weight: 600;
+  max-width: 12rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pill--btn:hover {
+  border-color: var(--accent);
+}
 .pill.live {
   color: #22c55e;
   border-color: rgba(34, 197, 94, 0.4);
@@ -141,6 +209,34 @@ select {
   background: #22c55e;
   box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.6);
   animation: pulse 1.6s infinite;
+}
+.peers {
+  display: flex;
+  align-items: center;
+}
+.avatar {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-size: 0.62rem;
+  font-weight: 700;
+  color: #04121f;
+  border: 2px solid var(--panel);
+  margin-left: -8px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+}
+.avatar:first-child {
+  margin-left: 0;
+}
+.avatar--self {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.avatar--more {
+  background: var(--border);
+  color: var(--text);
 }
 @keyframes pulse {
   0% {

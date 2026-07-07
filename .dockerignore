@@ -1,0 +1,25 @@
+# Never copy local installs or build outputs into the build context — the
+# image builds everything from source for reproducibility.
+node_modules
+**/node_modules
+dist
+**/dist
+.pulseboard-data
+**/*.log
+
+# VCS / editor / CI cruft
+.git
+.github
+.gitignore
+.vscode
+.idea
+coverage
+**/coverage
+*.tsbuildinfo
+
+# Docs and meta that don't belong in the image
+README.md
+CHANGELOG.md
+LICENSE
+.env
+.env.*

@@ -15,7 +15,7 @@ const chartKind = computed<'line' | 'area' | 'bar'>(() =>
   props.kind === 'area' ? 'area' : props.kind === 'bar' ? 'bar' : 'line',
 );
 
-useLiveChart(canvas, () => store.seriesFor(props.metric), {
+useLiveChart(canvas, () => store.viewSeriesFor(props.metric), {
   kind: chartKind.value,
   color: meta.value?.color ?? '#3b82f6',
   window: chartKind.value === 'bar' ? 24 : 60,

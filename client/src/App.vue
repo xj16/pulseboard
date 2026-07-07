@@ -3,6 +3,8 @@ import { onMounted } from 'vue';
 import { useDashboardStore } from './store/dashboard';
 import Toolbar from './components/Toolbar.vue';
 import DashboardGrid from './components/DashboardGrid.vue';
+import HistoryScrubber from './components/HistoryScrubber.vue';
+import Notices from './components/Notices.vue';
 
 const store = useDashboardStore();
 onMounted(() => store.connect());
@@ -30,6 +32,7 @@ onMounted(() => store.connect());
 
     <main class="app__main">
       <Toolbar />
+      <HistoryScrubber />
       <DashboardGrid />
     </main>
 
@@ -37,6 +40,8 @@ onMounted(() => store.connect());
       <span>Data is fully simulated locally — no external feed.</span>
       <span>Drag headers to move · drag corners to resize · changes sync to everyone.</span>
     </footer>
+
+    <Notices />
   </div>
 </template>
 

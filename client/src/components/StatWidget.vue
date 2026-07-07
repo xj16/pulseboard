@@ -10,7 +10,7 @@ const store = useDashboardStore();
 const meta = computed(() => store.metricById(props.metric));
 const value = computed(() => store.latestFor(props.metric));
 
-const series = computed(() => store.seriesFor(props.metric));
+const series = computed(() => store.viewSeriesFor(props.metric));
 // Trend vs the value ~10 ticks ago.
 const trend = computed(() => {
   const s = series.value;

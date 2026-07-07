@@ -6,11 +6,17 @@
  * moves it; dragging the bottom-right handle resizes it. During a gesture we
  * track a local "ghost" override for instant feedback, then commit the final
  * cell to the server on pointer-up (the server rebroadcasts to everyone).
+ *
+ * This component also drives the collaboration layer: it emits the local
+ * pointer position (grid-normalized, throttled) so peers see a live cursor,
+ * broadcasts drag-start/drag-end so peers get a soft-lock ring on the widget
+ * being moved, and renders every other peer's cursor via {@link PeerCursors}.
  */
-import { computed, reactive, ref } from 'vue';
+import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue';
 import { useDashboardStore } from '../store/dashboard';
 import { GRID_COLUMNS, type Widget } from '../protocol';
 import DashboardWidget from './DashboardWidget.vue';
+import PeerCursors from './PeerCursors.vue';
 
 const store = useDashboardStore();
 const gridEl = ref<HTMLElement | null>(null);
@@ -18,6 +24,9 @@ const gridEl = ref<HTMLElement | null>(null);
 /** Pixel height of one grid row. Columns are fluid (fr units). */
 const ROW_H = 70;
 const GAP = 12;
+
+/** Bounding box of the grid, kept fresh for cursor normalization. */
+const box = reactive({ width: 1, height: 1 });
 
 interface Ghost {
   id: string;
@@ -71,6 +80,8 @@ function styleFor(w: Widget) {
 function begin(mode: Exclude<Mode, null>, widget: Widget, ev: PointerEvent) {
   const grid = gridEl.value;
   if (!grid) return;
+  // Never grab a widget another peer is actively moving (soft lock).
+  if (store.draggerOf(widget.id)) return;
   const rect = grid.getBoundingClientRect();
   drag.colWidth = (rect.width - GAP * (GRID_COLUMNS - 1)) / GRID_COLUMNS;
   drag.mode = mode;
@@ -82,6 +93,9 @@ function begin(mode: Exclude<Mode, null>, widget: Widget, ev: PointerEvent) {
   drag.startW = widget.w;
   drag.startH = widget.h;
   ghost.current = { id: widget.id, x: widget.x, y: widget.y, w: widget.w, h: widget.h };
+
+  // Tell peers we grabbed this widget so they get a lock ring.
+  store.emitDrag(widget.id);
 
   window.addEventListener('pointermove', onMove);
   window.addEventListener('pointerup', onUp, { once: true });
@@ -120,10 +134,50 @@ function onUp() {
       store.resizeWidget(g.id, g.w, g.h);
     }
   }
+  // Release the lock ring for peers.
+  store.emitDrag(null);
   drag.mode = null;
   drag.id = null;
   ghost.current = null;
 }
+
+// --- Live cursor broadcasting (throttled to ~20/s) -------------------------
+
+let lastCursor = 0;
+function onPointerMove(ev: PointerEvent) {
+  const grid = gridEl.value;
+  if (!grid) return;
+  const now = performance.now();
+  if (now - lastCursor < 50) return;
+  lastCursor = now;
+  const rect = grid.getBoundingClientRect();
+  const x = (ev.clientX - rect.left) / rect.width;
+  const y = (ev.clientY - rect.top) / rect.height;
+  if (x < -0.05 || x > 1.05 || y < -0.05 || y > 1.05) return;
+  store.emitCursor(x, y);
+}
+
+let resizeObserver: ResizeObserver | null = null;
+function measure() {
+  const grid = gridEl.value;
+  if (!grid) return;
+  const rect = grid.getBoundingClientRect();
+  box.width = rect.width;
+  box.height = rect.height;
+}
+
+onMounted(() => {
+  measure();
+  gridEl.value?.addEventListener('pointermove', onPointerMove);
+  resizeObserver = new ResizeObserver(measure);
+  if (gridEl.value) resizeObserver.observe(gridEl.value);
+});
+
+onBeforeUnmount(() => {
+  gridEl.value?.removeEventListener('pointermove', onPointerMove);
+  resizeObserver?.disconnect();
+  window.removeEventListener('pointermove', onMove);
+});
 
 function clamp(v: number, lo: number, hi: number): number {
   return Math.min(hi, Math.max(lo, v));
@@ -131,28 +185,34 @@ function clamp(v: number, lo: number, hi: number): number {
 </script>
 
 <template>
-  <div ref="gridEl" class="grid">
-    <div
-      v-for="w in widgets"
-      :key="w.id"
-      class="grid__cell"
-      :class="{ dragging: drag.id === w.id }"
-      :style="styleFor(w)"
-    >
-      <DashboardWidget
-        :widget="w"
-        @drag-start="begin('move', w, $event)"
-        @resize-start="begin('resize', w, $event)"
-      />
-    </div>
+  <div class="grid-wrap">
+    <div ref="gridEl" class="grid">
+      <div
+        v-for="w in widgets"
+        :key="w.id"
+        class="grid__cell"
+        :class="{ dragging: drag.id === w.id }"
+        :style="styleFor(w)"
+      >
+        <DashboardWidget
+          :widget="w"
+          @drag-start="begin('move', w, $event)"
+          @resize-start="begin('resize', w, $event)"
+        />
+      </div>
 
-    <p v-if="widgets.length === 0" class="grid__empty">
-      No widgets yet — add one from the toolbar above.
-    </p>
+      <p v-if="widgets.length === 0" class="grid__empty">
+        No widgets yet — add one from the toolbar above.
+      </p>
+    </div>
+    <PeerCursors :box="box" />
   </div>
 </template>
 
 <style scoped>
+.grid-wrap {
+  position: relative;
+}
 .grid {
   display: grid;
   grid-template-columns: repeat(12, 1fr);

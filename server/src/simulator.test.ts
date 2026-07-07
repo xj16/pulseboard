@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { Simulator, METRICS } from './simulator.js';
+import { Simulator, METRICS, SCENARIOS } from './simulator.js';
 
 test('prefills history for every metric', () => {
   const sim = new Simulator({ historyLength: 50, seed: 42 });
@@ -54,4 +54,61 @@ test('same seed produces identical streams (deterministic)', () => {
 test('respects a custom tick interval', () => {
   const sim = new Simulator({ tickMs: 250 });
   assert.equal(sim.tickMs, 250);
+});
+
+// --- Scenarios --------------------------------------------------------------
+
+test('defaults to the calm scenario and can switch', () => {
+  const sim = new Simulator({ seed: 1 });
+  assert.equal(sim.getScenario(), 'calm');
+  sim.setScenario('incident');
+  assert.equal(sim.getScenario(), 'incident');
+});
+
+test('scenario values still respect metric ranges', () => {
+  for (const scenario of Object.keys(SCENARIOS) as (keyof typeof SCENARIOS)[]) {
+    const sim = new Simulator({ seed: 99, scenario });
+    for (let i = 0; i < 300; i++) {
+      const values = sim.tick();
+      for (const meta of METRICS) {
+        const v = values[meta.id];
+        assert.ok(
+          v >= meta.min && v <= meta.max,
+          `${scenario}: ${meta.id}=${v} out of range`,
+        );
+      }
+    }
+  }
+});
+
+test('a traffic-spike scenario drives requests_per_sec higher than calm', () => {
+  const seed = 4242;
+  const calm = new Simulator({ seed, scenario: 'calm', historyLength: 5 });
+  const spike = new Simulator({ seed, scenario: 'traffic-spike', historyLength: 5 });
+  const avg = (sim: Simulator): number => {
+    let sum = 0;
+    const n = 400;
+    for (let i = 0; i < n; i++) sum += sim.tick(1_700_000_000_000 + i * 1000).requests_per_sec;
+    return sum / n;
+  };
+  assert.ok(
+    avg(spike) > avg(calm),
+    'traffic-spike should lift the driver above calm on average',
+  );
+});
+
+test('an incident scenario raises the average error rate above calm', () => {
+  const seed = 20260707;
+  const calm = new Simulator({ seed, scenario: 'calm', historyLength: 5 });
+  const incident = new Simulator({ seed, scenario: 'incident', historyLength: 5 });
+  const avgErr = (sim: Simulator): number => {
+    let sum = 0;
+    const n = 600;
+    for (let i = 0; i < n; i++) sum += sim.tick(1_700_000_000_000 + i * 1000).error_rate;
+    return sum / n;
+  };
+  assert.ok(
+    avgErr(incident) > avgErr(calm),
+    'incident should elevate errors versus calm',
+  );
 });

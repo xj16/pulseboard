@@ -22,6 +22,7 @@
         <span class="dot"></span>{feed.connected ? 'Live' : 'Offline'}
       </span>
       <span class="pill">👥 {feed.presence}</span>
+      <span class="pill" title="Active simulator scenario">🎬 {feed.scenario}</span>
       <a class="pill link" href="/">Open Vue app →</a>
     </div>
   </header>

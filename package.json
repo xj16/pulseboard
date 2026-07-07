@@ -1,6 +1,6 @@
 {
   "name": "pulseboard",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "private": true,
   "description": "Real-time collaborative analytics dashboard with drag-to-arrange widgets and a built-in data simulator.",
   "license": "MIT",

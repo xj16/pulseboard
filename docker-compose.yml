@@ -1,0 +1,67 @@
+# PulseBoard — one-command run.
+#
+#   docker compose up                 # plain server at http://localhost:4000
+#   docker compose --profile demo up  # seeded "incident" demo board
+#
+# The default `pulseboard` service persists room layouts to a named volume so
+# boards survive restarts. The `demo` profile seeds a rich board and boots the
+# simulator in the "incident" scenario for a scripted "watch it propagate"
+# moment straight off a fresh clone.
+
+services:
+  pulseboard:
+    build: .
+    image: pulseboard:latest
+    ports:
+      - "4000:4000"
+    environment:
+      NODE_ENV: production
+      PORT: "4000"
+      TICK_MS: "1000"
+      DATA_DIR: /data
+    volumes:
+      - pulseboard-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:4000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 30s
+      timeout: 3s
+      retries: 3
+
+  # --- Demo profile: seed then run in the incident scenario ----------------
+  demo-seed:
+    build: .
+    image: pulseboard:latest
+    profiles: ["demo"]
+    command: ["node", "server/dist/seed.js", "demo"]
+    environment:
+      DATA_DIR: /data
+    volumes:
+      - pulseboard-demo-data:/data
+
+  demo:
+    build: .
+    image: pulseboard:latest
+    profiles: ["demo"]
+    depends_on:
+      demo-seed:
+        condition: service_completed_successfully
+    ports:
+      - "4000:4000"
+    environment:
+      NODE_ENV: production
+      PORT: "4000"
+      TICK_MS: "1000"
+      DATA_DIR: /data
+      SCENARIO: incident
+    volumes:
+      - pulseboard-demo-data:/data
+    restart: unless-stopped
+
+volumes:
+  pulseboard-data:
+  pulseboard-demo-data:

@@ -1,133 +1,64 @@
 /**
  * PulseBoard server entrypoint.
  *
- * Responsibilities:
- *  - Run the {@link Simulator} on a fixed interval and broadcast each tick.
- *  - Hold the shared collaborative {@link Board} and apply mutations from
- *    any client, rebroadcasting the authoritative state.
- *  - Track presence (connected client count).
- *  - Expose a tiny health/REST surface and, in production, serve the built
- *    Vue client as static files.
+ * Reads configuration from the environment, constructs the server via
+ * {@link createPulseServer}, binds the port, starts the tick loop, and shuts
+ * down cleanly on SIGTERM/SIGINT (flush persistence, stop ticking, close io).
+ *
+ * All the interesting wiring lives in {@link ./server.ts} so it can be booted
+ * headless in tests without touching a fixed port.
  */
 
-import { createServer } from 'node:http';
-import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
-import { existsSync } from 'node:fs';
-
-import express from 'express';
-import cors from 'cors';
-import { Server } from 'socket.io';
-
-import type {
-  ClientToServerEvents,
-  ServerToClientEvents,
-  Tick,
-} from './protocol.js';
-import { Simulator, METRICS } from './simulator.js';
-import { Board } from './board.js';
+import { resolve } from 'node:path';
+import { createPulseServer } from './server.js';
 
 const PORT = Number(process.env.PORT ?? 4000);
 const TICK_MS = Number(process.env.TICK_MS ?? 1000);
-const ORIGIN = process.env.CLIENT_ORIGIN ?? '*';
+const NODE_ENV = process.env.NODE_ENV;
 
-const app = express();
-app.use(cors({ origin: ORIGIN }));
-app.use(express.json());
+// Default to same-origin-only in production; opt into '*' explicitly for dev.
+const ORIGIN =
+  process.env.CLIENT_ORIGIN ?? (NODE_ENV === 'production' ? false : '*');
 
-const simulator = new Simulator({ tickMs: TICK_MS });
-const board = new Board();
+// Where per-room board JSON is persisted. Set DATA_DIR='' to disable.
+const DATA_DIR =
+  process.env.DATA_DIR === ''
+    ? undefined
+    : resolve(process.env.DATA_DIR ?? '.pulseboard-data');
 
-// --- REST surface (handy for probes and non-socket consumers) -------------
-
-app.get('/api/health', (_req, res) => {
-  res.json({ status: 'ok', uptime: process.uptime(), tickMs: TICK_MS });
+const server = createPulseServer({
+  tickMs: TICK_MS,
+  origin: ORIGIN,
+  dataDir: DATA_DIR,
+  scenario: process.env.SCENARIO,
 });
 
-app.get('/api/metrics', (_req, res) => {
-  res.json({ metrics: METRICS });
-});
+const stopTicking = server.startTicking();
 
-app.get('/api/board', (_req, res) => {
-  res.json(board.snapshot());
-});
-
-app.get('/api/history', (_req, res) => {
-  res.json(simulator.allHistory());
-});
-
-// --- Static hosting of the built Vue client (production) -------------------
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const clientDist = join(__dirname, '..', '..', 'client', 'dist');
-if (existsSync(clientDist)) {
-  app.use(express.static(clientDist));
-  app.get('*', (_req, res) => {
-    res.sendFile(join(clientDist, 'index.html'));
-  });
-}
-
-// --- Socket.IO -------------------------------------------------------------
-
-const httpServer = createServer(app);
-const io = new Server<ClientToServerEvents, ServerToClientEvents>(httpServer, {
-  cors: { origin: ORIGIN },
-});
-
-function broadcastPresence(): void {
-  io.emit('presence', io.engine.clientsCount);
-}
-
-io.on('connection', (socket) => {
-  // Send the full snapshot so the client renders immediately.
-  socket.emit('hello', {
-    metrics: METRICS,
-    history: simulator.allHistory(),
-    board: board.snapshot(),
-    presence: io.engine.clientsCount,
-    tickMs: simulator.tickMs,
-  });
-  broadcastPresence();
-
-  socket.on('board:addWidget', (widget) => {
-    io.emit('board:update', board.addWidget(widget));
-  });
-
-  socket.on('board:moveWidget', ({ id, x, y }) => {
-    io.emit('board:update', board.moveWidget(id, x, y));
-  });
-
-  socket.on('board:resizeWidget', ({ id, w, h }) => {
-    io.emit('board:update', board.resizeWidget(id, w, h));
-  });
-
-  socket.on('board:removeWidget', ({ id }) => {
-    io.emit('board:update', board.removeWidget(id));
-  });
-
-  socket.on('board:reset', () => {
-    io.emit('board:update', board.reset());
-  });
-
-  socket.on('disconnect', () => {
-    broadcastPresence();
-  });
-});
-
-// --- Tick loop -------------------------------------------------------------
-
-setInterval(() => {
-  const now = Date.now();
-  const values = simulator.tick(now);
-  const payload: Tick = { t: now, values };
-  io.emit('tick', payload);
-}, simulator.tickMs);
-
-httpServer.listen(PORT, () => {
+server.httpServer.listen(PORT, () => {
   // eslint-disable-next-line no-console
   console.log(
-    `PulseBoard server listening on http://localhost:${PORT} (tick ${TICK_MS}ms)`,
+    `PulseBoard server listening on http://localhost:${PORT} ` +
+      `(tick ${TICK_MS}ms, scenario ${server.simulator.getScenario()}` +
+      `${DATA_DIR ? `, persisting to ${DATA_DIR}` : ', persistence off'})`,
   );
 });
 
-export { app, io, simulator, board };
+let shuttingDown = false;
+async function shutdown(signal: string): Promise<void> {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  // eslint-disable-next-line no-console
+  console.log(`\n${signal} received — shutting down gracefully…`);
+  stopTicking();
+  // Failsafe: never hang forever waiting for lingering sockets.
+  const failsafe = setTimeout(() => process.exit(0), 3000);
+  failsafe.unref();
+  await server.close();
+  process.exit(0);
+}
+
+process.on('SIGTERM', () => void shutdown('SIGTERM'));
+process.on('SIGINT', () => void shutdown('SIGINT'));
+
+export const { app, io, simulator, rooms } = server;

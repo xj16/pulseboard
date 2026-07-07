@@ -31,10 +31,22 @@ export interface Tick {
   values: Record<MetricId, number>;
 }
 
+export type ScenarioId = 'calm' | 'traffic-spike' | 'incident' | 'deploy-blip';
+
+export interface Peer {
+  id: string;
+  name: string;
+  color: string;
+}
+
 export interface HelloPayload {
+  room: string;
+  self: Peer;
+  peers: Peer[];
   metrics: MetricMeta[];
   history: Record<MetricId, Sample[]>;
   board: { rev: number; widgets: unknown[] };
   presence: number;
   tickMs: number;
+  scenario: ScenarioId;
 }

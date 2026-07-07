@@ -7,13 +7,31 @@
  */
 
 import { io, type Socket } from 'socket.io-client';
-import type { HelloPayload, MetricId, MetricMeta, Sample, Tick } from './protocol';
+import type {
+  HelloPayload,
+  MetricId,
+  MetricMeta,
+  Sample,
+  ScenarioId,
+  Tick,
+} from './protocol';
 
 const MAX_POINTS = 90;
+
+/** Derive the room slug from the URL so the Svelte view can join a shared board. */
+function roomFromLocation(): string {
+  const params = new URLSearchParams(window.location.search);
+  const q = params.get('room');
+  if (q) return q;
+  const m = window.location.pathname.match(/^\/b\/([^/]+)/);
+  return m ? decodeURIComponent(m[1]) : 'main';
+}
 
 class Feed {
   connected = $state(false);
   presence = $state(0);
+  room = $state('main');
+  scenario = $state<ScenarioId>('calm');
   metrics = $state<MetricMeta[]>([]);
   series = $state<Record<string, Sample[]>>({});
   latest = $state<Record<string, number>>({});
@@ -22,7 +40,10 @@ class Feed {
 
   constructor() {
     const url = import.meta.env.VITE_SERVER_URL ?? '';
-    this.socket = io(url, { transports: ['websocket', 'polling'] });
+    this.socket = io(url, {
+      transports: ['websocket', 'polling'],
+      query: { room: roomFromLocation() },
+    });
 
     this.socket.on('connect', () => (this.connected = true));
     this.socket.on('disconnect', () => (this.connected = false));
@@ -31,10 +52,16 @@ class Feed {
       this.metrics = payload.metrics;
       this.series = { ...payload.history };
       this.presence = payload.presence;
+      this.room = payload.room;
+      this.scenario = payload.scenario;
       for (const m of payload.metrics) {
         const h = payload.history[m.id];
         this.latest[m.id] = h?.length ? h[h.length - 1].v : 0;
       }
+    });
+
+    this.socket.on('scenario:update', (scenario: ScenarioId) => {
+      this.scenario = scenario;
     });
 
     this.socket.on('tick', (tick: Tick) => {

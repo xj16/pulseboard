@@ -2,20 +2,30 @@
  * The collaborative board state.
  *
  * PulseBoard is "collaborative" in that every connected client shares one
- * board layout. When anyone adds, moves, resizes, or removes a widget, the
- * mutation is applied here and the new state is broadcast to everyone. The
- * `rev` counter increments on each successful mutation so clients can tell
- * their optimistic view apart from the authoritative one.
+ * board layout per room. When anyone adds, moves, resizes, updates, or removes
+ * a widget, the mutation is applied here and the new state is broadcast to
+ * everyone in that room. The `rev` counter increments on each successful
+ * mutation and is used for real optimistic-concurrency control: a mutation
+ * stamped with a stale rev is rejected so clients can rebase instead of
+ * silently clobbering a change they never saw.
  */
 
 import { randomUUID } from 'node:crypto';
-import type { BoardState, Widget } from './protocol.js';
+import type { BoardState, MetricId, Widget, WidgetKind } from './protocol.js';
 
 /** The grid is a fixed number of columns wide; height grows as needed. */
 export const GRID_COLUMNS = 12;
 
+/** Hard cap on widgets per board — stops a client adding unbounded widgets. */
+export const MAX_WIDGETS = 40;
+
+/** Discriminates a successful mutation from a rejected one. */
+export type MutationResult =
+  | { ok: true; state: BoardState }
+  | { ok: false; reason: 'stale-rev' | 'capacity'; state: BoardState };
+
 /** A sensible starter layout so a fresh board is never blank. */
-function defaultWidgets(): Widget[] {
+export function defaultWidgets(): Widget[] {
   return [
     {
       id: randomUUID(),
@@ -56,6 +66,7 @@ function defaultWidgets(): Widget[] {
       y: 1,
       w: 3,
       h: 2,
+      threshold: { value: 5, dir: 'above' },
     },
     {
       id: randomUUID(),
@@ -79,7 +90,7 @@ function defaultWidgets(): Widget[] {
     },
     {
       id: randomUUID(),
-      kind: 'line',
+      kind: 'bar',
       metric: 'revenue',
       title: 'Revenue / min',
       x: 1,
@@ -93,8 +104,8 @@ function defaultWidgets(): Widget[] {
 export class Board {
   private state: BoardState;
 
-  constructor() {
-    this.state = { rev: 1, widgets: defaultWidgets() };
+  constructor(initial?: BoardState) {
+    this.state = initial ?? { rev: 1, widgets: defaultWidgets() };
   }
 
   /** Current authoritative snapshot. */
@@ -102,12 +113,33 @@ export class Board {
     return this.state;
   }
 
+  /** Replace state wholesale (used when hydrating from persistence). */
+  hydrate(state: BoardState): void {
+    this.state = state;
+  }
+
   private bump(widgets: Widget[]): BoardState {
     this.state = { rev: this.state.rev + 1, widgets };
     return this.state;
   }
 
-  addWidget(input: Omit<Widget, 'id'>): BoardState {
+  /**
+   * Optimistic-concurrency guard. If the caller supplies a rev and it does not
+   * match the current authoritative rev, the mutation is stale — the caller was
+   * acting on a board they have since fallen behind on. `undefined` opts out
+   * (used by trusted/legacy callers and internal seeding).
+   */
+  private isStale(rev: number | undefined): boolean {
+    return typeof rev === 'number' && rev !== this.state.rev;
+  }
+
+  addWidget(input: Omit<Widget, 'id'>, rev?: number): MutationResult {
+    if (this.isStale(rev)) {
+      return { ok: false, reason: 'stale-rev', state: this.state };
+    }
+    if (this.state.widgets.length >= MAX_WIDGETS) {
+      return { ok: false, reason: 'capacity', state: this.state };
+    }
     const widget: Widget = {
       id: randomUUID(),
       kind: input.kind,
@@ -117,20 +149,27 @@ export class Board {
       y: Math.max(1, Math.floor(input.y) || 1),
       w: clampSpan(input.w),
       h: Math.max(1, Math.floor(input.h) || 2),
+      threshold: input.threshold ?? null,
     };
-    return this.bump([...this.state.widgets, widget]);
+    return { ok: true, state: this.bump([...this.state.widgets, widget]) };
   }
 
-  moveWidget(id: string, x: number, y: number): BoardState {
+  moveWidget(id: string, x: number, y: number, rev?: number): MutationResult {
+    if (this.isStale(rev)) {
+      return { ok: false, reason: 'stale-rev', state: this.state };
+    }
     const widgets = this.state.widgets.map((w) =>
       w.id === id
         ? { ...w, x: clampCol(x, w.w), y: Math.max(1, Math.floor(y) || 1) }
         : w,
     );
-    return this.bump(widgets);
+    return { ok: true, state: this.bump(widgets) };
   }
 
-  resizeWidget(id: string, w: number, h: number): BoardState {
+  resizeWidget(id: string, w: number, h: number, rev?: number): MutationResult {
+    if (this.isStale(rev)) {
+      return { ok: false, reason: 'stale-rev', state: this.state };
+    }
     const widgets = this.state.widgets.map((widget) =>
       widget.id === id
         ? {
@@ -141,17 +180,59 @@ export class Board {
           }
         : widget,
     );
-    return this.bump(widgets);
+    return { ok: true, state: this.bump(widgets) };
   }
 
-  removeWidget(id: string): BoardState {
+  /**
+   * Edit a widget's presentation in place (metric / kind / title / threshold).
+   * Only the provided fields change; geometry is untouched.
+   */
+  updateWidget(
+    id: string,
+    patch: {
+      kind?: WidgetKind;
+      metric?: MetricId;
+      title?: string;
+      threshold?: { value: number; dir: 'above' | 'below' } | null;
+    },
+    rev?: number,
+  ): MutationResult {
+    if (this.isStale(rev)) {
+      return { ok: false, reason: 'stale-rev', state: this.state };
+    }
+    let touched = false;
+    const widgets = this.state.widgets.map((widget) => {
+      if (widget.id !== id) return widget;
+      touched = true;
+      return {
+        ...widget,
+        kind: patch.kind ?? widget.kind,
+        metric: patch.metric ?? widget.metric,
+        title: patch.title ?? widget.title,
+        threshold:
+          patch.threshold !== undefined ? patch.threshold : widget.threshold,
+      };
+    });
+    if (!touched) return { ok: true, state: this.state };
+    return { ok: true, state: this.bump(widgets) };
+  }
+
+  removeWidget(id: string, rev?: number): MutationResult {
+    if (this.isStale(rev)) {
+      return { ok: false, reason: 'stale-rev', state: this.state };
+    }
     const widgets = this.state.widgets.filter((w) => w.id !== id);
-    if (widgets.length === this.state.widgets.length) return this.state;
-    return this.bump(widgets);
+    if (widgets.length === this.state.widgets.length) {
+      return { ok: true, state: this.state };
+    }
+    return { ok: true, state: this.bump(widgets) };
   }
 
-  reset(): BoardState {
-    return this.bump(defaultWidgets());
+  reset(rev?: number): MutationResult {
+    if (this.isStale(rev)) {
+      return { ok: false, reason: 'stale-rev', state: this.state };
+    }
+    return { ok: true, state: this.bump(defaultWidgets()) };
   }
 }
 

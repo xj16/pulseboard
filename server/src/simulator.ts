@@ -8,7 +8,7 @@
  * and deterministic enough to be testable.
  */
 
-import type { MetricId, MetricMeta, Sample } from './protocol.js';
+import type { MetricId, MetricMeta, Sample, ScenarioId } from './protocol.js';
 
 /** Static metadata for every simulated metric. */
 export const METRICS: MetricMeta[] = [
@@ -68,6 +68,45 @@ export const METRICS: MetricMeta[] = [
   },
 ];
 
+/**
+ * How a named scenario biases the world. `driverBias` nudges the traffic
+ * driver's target up or down (fraction of its range); `couplingGain` amplifies
+ * how hard traffic drags downstream metrics; `spikeRate` overrides the chance
+ * of a per-tick spike; `spikeMetrics` (when set) restricts spikes to a subset,
+ * so e.g. a "deploy blip" only jolts errors + latency, not revenue.
+ */
+interface ScenarioConfig {
+  driverBias: number;
+  couplingGain: number;
+  spikeRate: number;
+  spikeMetrics?: MetricId[];
+  /** Extra positive-only spike magnitude bias for the affected metrics. */
+  spikeUpward?: boolean;
+}
+
+export const SCENARIOS: Record<ScenarioId, ScenarioConfig> = {
+  // Quiet, well-behaved system — low volatility, almost no spikes.
+  calm: { driverBias: -0.1, couplingGain: 0.8, spikeRate: 0.003 },
+  // Sustained traffic surge — driver pushed high, strong downstream coupling.
+  'traffic-spike': { driverBias: 0.32, couplingGain: 1.35, spikeRate: 0.02 },
+  // Something is on fire — errors + latency + cpu jolt upward, frequently.
+  incident: {
+    driverBias: 0.1,
+    couplingGain: 1.5,
+    spikeRate: 0.06,
+    spikeMetrics: ['error_rate', 'latency_ms', 'cpu_load'],
+    spikeUpward: true,
+  },
+  // A bad deploy: a brief, sharp error/latency blip against a normal baseline.
+  'deploy-blip': {
+    driverBias: 0,
+    couplingGain: 1.1,
+    spikeRate: 0.04,
+    spikeMetrics: ['error_rate', 'latency_ms'],
+    spikeUpward: true,
+  },
+};
+
 /** Internal per-metric state used to evolve the walk. */
 interface StreamState {
   meta: MetricMeta;
@@ -121,6 +160,8 @@ export interface SimulatorOptions {
   historyLength?: number;
   /** PRNG seed. Defaults to a value derived from the current time. */
   seed?: number;
+  /** Initial named scenario. Defaults to 'calm'. */
+  scenario?: ScenarioId;
 }
 
 /**
@@ -133,11 +174,13 @@ export class Simulator {
   private readonly rand: () => number;
   private readonly streams = new Map<MetricId, StreamState>();
   private readonly buffers = new Map<MetricId, Sample[]>();
+  private scenario: ScenarioId = 'calm';
 
   constructor(options: SimulatorOptions = {}) {
     this.tickMs = options.tickMs ?? 1000;
     this.historyLength = options.historyLength ?? 120;
     this.rand = mulberry32(options.seed ?? (Date.now() & 0xffffffff));
+    if (options.scenario) this.scenario = options.scenario;
 
     for (const meta of METRICS) {
       const range = meta.max - meta.min;
@@ -156,6 +199,16 @@ export class Simulator {
 
     // Pre-fill history so the very first client sees populated charts.
     this.prefillHistory();
+  }
+
+  /** The currently active scenario. */
+  getScenario(): ScenarioId {
+    return this.scenario;
+  }
+
+  /** Switch the active scenario. Takes effect from the next tick. */
+  setScenario(scenario: ScenarioId): void {
+    this.scenario = scenario;
   }
 
   /** Retained history for a metric (oldest first). */
@@ -178,9 +231,13 @@ export class Simulator {
    */
   tick(now: number = Date.now()): Record<MetricId, number> {
     const values = {} as Record<MetricId, number>;
+    const cfg = SCENARIOS[this.scenario];
+
     // Requests-per-sec acts as the "driver": high traffic pushes CPU,
     // latency and errors up. We compute it first, then couple the rest.
-    const rps = this.step('requests_per_sec', now, 0);
+    // The scenario's driverBias nudges the driver's own target so a
+    // "traffic-spike" run genuinely lifts the whole coupled system.
+    const rps = this.step('requests_per_sec', now, cfg.driverBias * 2);
     values.requests_per_sec = rps;
 
     const rpsMeta = this.streams.get('requests_per_sec')!.meta;
@@ -192,12 +249,13 @@ export class Simulator {
     const driverCenterFraction = 0.45;
     const loadDeviation =
       (rps / rpsMeta.max - driverCenterFraction) / (1 - driverCenterFraction);
+    const g = cfg.couplingGain;
 
-    values.active_users = this.step('active_users', now, loadDeviation * 0.4);
-    values.cpu_load = this.step('cpu_load', now, loadDeviation * 0.55);
-    values.latency_ms = this.step('latency_ms', now, loadDeviation * 0.6);
-    values.error_rate = this.step('error_rate', now, loadDeviation * 0.5);
-    values.revenue = this.step('revenue', now, loadDeviation * 0.45);
+    values.active_users = this.step('active_users', now, loadDeviation * 0.4 * g);
+    values.cpu_load = this.step('cpu_load', now, loadDeviation * 0.55 * g);
+    values.latency_ms = this.step('latency_ms', now, loadDeviation * 0.6 * g);
+    values.error_rate = this.step('error_rate', now, loadDeviation * 0.5 * g);
+    values.revenue = this.step('revenue', now, loadDeviation * 0.45 * g);
     return values;
   }
 
@@ -226,8 +284,18 @@ export class Simulator {
     // Random gaussian shock.
     const shock = gaussian(this.rand) * s.volatility * range;
 
-    // Rare spike (~1.5% of ticks) that decays via reversion afterward.
-    const spike = this.rand() < 0.015 ? (this.rand() - 0.3) * range * 0.5 : 0;
+    // Spike behaviour is scenario-dependent. By default a rare (~1.5%) spike
+    // that can go either way; under an "incident"/"deploy-blip" it is more
+    // frequent, restricted to the affected metrics, and biased upward so the
+    // fault visibly propagates (errors/latency jump, not dip).
+    const cfg = SCENARIOS[this.scenario];
+    const spikeAllowed =
+      !cfg.spikeMetrics || cfg.spikeMetrics.includes(id);
+    let spike = 0;
+    if (spikeAllowed && this.rand() < cfg.spikeRate) {
+      const bias = cfg.spikeUpward ? 0.15 : -0.3;
+      spike = (this.rand() + bias) * range * 0.5;
+    }
 
     let next = s.value + pull + shock + spike;
     // Blend the seasonal + load target in gently so it shapes the baseline.

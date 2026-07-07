@@ -31,6 +31,9 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 
+# Persisted room boards (default DATA_DIR)
+.pulseboard-data/
+
 # Env & local
 .env
 .env.*
